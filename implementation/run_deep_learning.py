@@ -24,7 +24,7 @@ from sklearn.metrics import (
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
-from shared_preprocessing import build_clean_dataset
+from shared_preprocessing import build_clean_dataset, tune_threshold
 
 
 FEATURES = [
@@ -34,6 +34,7 @@ FEATURES = [
     "byte_density", "retransmission_rate", "unique_dst_port_count",
     "avg_time_between_syns", "pkt_len_mean", "pkt_len_std",
     "udp_ratio", "syn_ratio",
+    "dst_port_lt_1024", "src_port_lt_1024", "is_rst_flag", "is_icmp", "response_direction",
 ]
 
 
@@ -46,30 +47,11 @@ def _compute_sample_weights(y: pd.Series) -> np.ndarray:
     return np.where(y == 1, w_pos, w_neg)
 
 
-def _threshold_tune(y_true, y_score, min_recall: float = 0.40) -> float:
-    thresholds = np.linspace(0.05, 0.95, 181)
-    best_t, best_score = 0.5, -1.0
-    for t in thresholds:
-        pred = (y_score >= t).astype(int)
-        rec = recall_score(y_true, pred, zero_division=0)
-        if rec < min_recall:
-            continue
-        score = (
-            0.60 * f1_score(y_true, pred, zero_division=0)
-            + 0.25 * accuracy_score(y_true, pred)
-            + 0.15 * balanced_accuracy_score(y_true, pred)
-        )
-        if score > best_score:
-            best_score = score
-            best_t = float(t)
-    return best_t if best_score >= 0 else 0.5
-
-
 def main() -> None:
     clean_path = Path("data/syn_udp_flood_attack_data_clean.csv")
     if not clean_path.exists():
         build_clean_dataset(
-            input_csv="data/syn_udp_flood_attack_data_labeled.csv",
+            input_csv="data/syn_udp_flood_attack_data_labeled_diraware.csv",
             output_csv=str(clean_path),
             output_report="reports/clean_dataset_report.json",
         )
@@ -121,7 +103,7 @@ def main() -> None:
 
     proba_train = model.predict_proba(X_train)[:, 1]
     proba_test  = model.predict_proba(X_test)[:, 1]
-    threshold   = _threshold_tune(y_train, proba_train)
+    threshold   = tune_threshold(y_train, proba_train)
     y_pred      = (proba_test >= threshold).astype(int)
 
     metrics = {

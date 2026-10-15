@@ -1,11 +1,16 @@
-"""Normal Decision Tree baseline — GridSearchCV tuning, corrected paths.
+"""Normal Decision Tree baseline — trained by the IDENTICAL procedure as the
+Fuzzy DT (see shared_preprocessing.fit_lightweight_tree).
 
-Trained WITHOUT any fuzzy features so the comparison is honest.
+The only difference between this baseline and the fuzzy model is the feature
+space: raw window statistics vs fuzzy membership grades + rule activations.
+Same grid, same class weights, same cost-complexity pruning, same shared
+threshold tuner — so any metric gap is attributable to the fuzzy
+representation alone, not to a tuning advantage.
 """
 import json
 from pathlib import Path
 
-import numpy as np
+import joblib
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
@@ -16,10 +21,8 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
-from sklearn.tree import DecisionTreeClassifier
 
-from shared_preprocessing import build_clean_dataset
+from shared_preprocessing import build_clean_dataset, fit_lightweight_tree, tune_threshold
 
 
 FEATURES = [
@@ -29,33 +32,15 @@ FEATURES = [
     "byte_density", "retransmission_rate", "unique_dst_port_count",
     "avg_time_between_syns", "pkt_len_mean", "pkt_len_std",
     "udp_ratio", "syn_ratio",
+    "dst_port_lt_1024", "src_port_lt_1024", "is_rst_flag", "is_icmp", "response_direction",
 ]
-
-
-def _threshold_tune(y_true, y_score, min_recall: float = 0.35) -> float:
-    thresholds = np.linspace(0.05, 0.95, 181)
-    best_t, best_score = 0.5, -1.0
-    for t in thresholds:
-        pred = (y_score >= t).astype(int)
-        rec = recall_score(y_true, pred, zero_division=0)
-        if rec < min_recall:
-            continue
-        score = (
-            0.60 * f1_score(y_true, pred, zero_division=0)
-            + 0.25 * accuracy_score(y_true, pred)
-            + 0.15 * balanced_accuracy_score(y_true, pred)
-        )
-        if score > best_score:
-            best_score = score
-            best_t = float(t)
-    return best_t if best_score >= 0 else 0.5
 
 
 def main() -> None:
     clean_path = Path("data/syn_udp_flood_attack_data_clean.csv")
     if not clean_path.exists():
         build_clean_dataset(
-            input_csv="data/syn_udp_flood_attack_data_labeled.csv",
+            input_csv="data/syn_udp_flood_attack_data_labeled_diraware.csv",
             output_csv=str(clean_path),
             output_report="reports/clean_dataset_report.json",
         )
@@ -69,27 +54,16 @@ def main() -> None:
     y_train = df.loc[train_mask, "attack"].astype(int)
     y_test  = df.loc[test_mask,  "attack"].astype(int)
 
-    param_grid = {
-        "max_depth": [8, 10, 12, 15, 18],
-        "min_samples_split": [2, 5, 10],
-        "min_samples_leaf": [1, 2, 5],
-        "class_weight": ["balanced"],
-    }
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    grid = GridSearchCV(
-        DecisionTreeClassifier(random_state=42),
-        param_grid,
-        cv=cv,
-        scoring="f1",
-        n_jobs=-1,
-        verbose=1,
-    )
-    grid.fit(X_train, y_train)
-    model = grid.best_estimator_
+    model, meta = fit_lightweight_tree(X_train, y_train)
+    print(f"  Config: {meta['best_config']} | CV F1={meta['best_cv_f1']}")
+    if meta.get("selected"):
+        print(f"  Pruned to {meta['nodes']} nodes (ccp_alpha={meta['ccp_alpha']:.5f})")
+    else:
+        print(f"  Unpruned: {meta['unpruned_nodes']} nodes")
 
     proba_train = model.predict_proba(X_train)[:, 1]
     proba_test  = model.predict_proba(X_test)[:, 1]
-    threshold   = _threshold_tune(y_train, proba_train)
+    threshold   = tune_threshold(y_train, proba_train)
     y_pred      = (proba_test >= threshold).astype(int)
 
     metrics = {
@@ -101,9 +75,16 @@ def main() -> None:
         "auc":               float(roc_auc_score(y_test, proba_test)),
     }
 
+    joblib.dump(
+        {"model": model, "feature_order": FEATURES, "threshold": float(threshold)},
+        "normal_dt.pkl",
+    )
+
     report = {
         "model_type": "Normal_DT",
-        "best_params": grid.best_params_,
+        "training_protocol": "identical to Fuzzy DT (shared grid + CV pruning + threshold tuner)",
+        "best_params": meta["best_config"],
+        "tree_meta": meta,
         "feature_count": len(FEATURES),
         "threshold": float(threshold),
         "metrics": metrics,
@@ -118,9 +99,8 @@ def main() -> None:
         json.dump(report, f, indent=2)
 
     print("Normal DT training complete.")
-    print(f"  Best params: {grid.best_params_}")
     print(f"  Metrics:     {metrics}")
-    print("Saved: reports/normal_dt_results.json")
+    print("Saved: normal_dt.pkl | reports/normal_dt_results.json")
 
 
 if __name__ == "__main__":

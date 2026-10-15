@@ -1,39 +1,69 @@
 {
   "models": [
     {
-      "model": "normal_dt",
-      "accuracy_%": 77.94,
-      "AUC": 0.7833,
-      "recall_%": 52.19,
-      "F1": 0.4128
-    },
-    {
-      "model": "deep_mlp",
-      "accuracy_%": 80.47,
-      "AUC": 0.7883,
-      "recall_%": 41.16,
-      "F1": 0.3852
+      "model": "fuzzy_dt_single",
+      "accuracy_%": 87.74,
+      "balanced_accuracy_%": 78.34,
+      "precision_%": 34.51,
+      "recall_%": 67.25,
+      "F1": 0.4561,
+      "AUC": 0.908,
+      "deployed": true
     },
     {
       "model": "fuzzy_forest",
-      "accuracy_%": 81.73,
-      "AUC": 0.7973,
-      "recall_%": 40.82,
-      "F1": 0.3991
+      "accuracy_%": 88.29,
+      "balanced_accuracy_%": 75.64,
+      "precision_%": 34.78,
+      "recall_%": 60.7,
+      "F1": 0.4422,
+      "AUC": 0.9115,
+      "deployed": false
+    },
+    {
+      "model": "normal_dt",
+      "accuracy_%": 86.39,
+      "balanced_accuracy_%": 78.52,
+      "precision_%": 31.97,
+      "recall_%": 69.24,
+      "F1": 0.4375,
+      "AUC": 0.917,
+      "deployed": false
+    },
+    {
+      "model": "deep_mlp",
+      "accuracy_%": 86.51,
+      "balanced_accuracy_%": 78.67,
+      "precision_%": 32.24,
+      "recall_%": 69.41,
+      "F1": 0.4403,
+      "AUC": 0.9105,
+      "deployed": false
     }
   ],
   "latency_ms_per_packet": {
-    "fuzzy_forest": 0.0127,
-    "deep_mlp": 0.0044,
-    "normal_dt": 0.0015
+    "fuzzy_dt_single": 0.01337,
+    "fuzzy_forest": 0.024,
+    "normal_dt": 0.00076,
+    "deep_mlp": 0.00505
   },
   "model_sizes": {
-    "fuzzy_forest": "2.91 MB (30 trees)",
-    "deep_mlp": "1135.1 KB",
-    "normal_dt": "45.0 KB (unpruned)"
+    "fuzzy_dt_single": "9.1 KB",
+    "fuzzy_forest": "2.72 MB (30 trees)",
+    "normal_dt": "7.1 KB",
+    "deep_mlp": "1.14 MB (256-128-64-32)"
+  },
+  "tree_nodes": {
+    "fuzzy_dt_single": 89,
+    "normal_dt": 71
+  },
+  "evaluation": {
+    "split": "chronological per-segment 80/20 with 50-packet buffer (no window overlap)",
+    "threshold_tuning": "shared objective (0.5*F1 + 0.3*accuracy + 0.2*balanced-accuracy, recall floor 0.35) on train",
+    "latency": "median of 5 vectorized runs on 2000 test packets, real artifacts, fuzzy enrichment included"
   },
   "fuzzy_dt_single": {
-    "accuracy_%": 82.63,
-    "size_kb": 143.3
+    "accuracy_%": 87.74,
+    "size_kb": "9.1 KB"
   }
 }

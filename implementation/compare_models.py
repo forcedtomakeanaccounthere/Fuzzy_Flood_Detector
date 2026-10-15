@@ -1,13 +1,20 @@
 """Cross-model comparison and benchmark generator.
 
-Measures inference latency using VECTORIZED batch prediction (not per-packet
-loops) so the numbers reflect real throughput on the Raspberry Pi. Each model
-gets exactly one predict_proba() call on a 2000-row bulk test batch.
+Fairness rules:
+- Every model is measured from its SAVED ARTIFACT (fuzzy_forest.pkl,
+  normal_dt.pkl, deep_learning_mlp.pkl) — no re-created stand-ins.
+- Latency = end-to-end per-packet inference: for the fuzzy models it INCLUDES
+  the fuzzy enrichment step (membership grades + rules), because that step is
+  part of the method; for the MLP it includes scaling. Median of 5 bulk runs
+  on the same 2,000 held-out packets.
+- Metrics come from the training reports (identical chronological hold-out,
+  identical threshold tuner for all models).
 
-Reports are saved to reports/model_comparison_report.json.
+Saved to reports/model_comparison_report.json (rendered in the dashboard).
 """
+import io
 import json
-import os
+import pickle
 import time
 from pathlib import Path
 
@@ -19,24 +26,33 @@ from fuzzy_inference import FuzzyForestPredictor
 
 
 CLEAN_CSV = Path("data/syn_udp_flood_attack_data_clean.csv")
-REPORTS   = {
-    "fuzzy_forest": Path("reports/fuzzy_dt_results.json"),
-    "normal_dt":    Path("reports/normal_dt_results.json"),
-    "deep_mlp":     Path("reports/deep_learning_results.json"),
+REPORTS = {
+    "fuzzy_dt_single": Path("reports/fuzzy_dt_results.json"),
+    "fuzzy_forest":    Path("reports/fuzzy_dt_results.json"),
+    "normal_dt":       Path("reports/normal_dt_results.json"),
+    "deep_mlp":        Path("reports/deep_learning_results.json"),
 }
-ARTIFACTS = {
-    "fuzzy_forest": Path("fuzzy_forest.pkl"),
-    "normal_dt":    None,
-    "deep_mlp":     Path("deep_learning_mlp.pkl"),
-}
-FUZZY_DT_FEATURES = None   # resolved dynamically from artifact
-N_BATCH = 2_000            # rows per latency benchmark
+N_BATCH = 2_000
+N_REPEATS = 5
 
 
-def _model_size_kb(path: Path | None) -> float:
-    if path is None:
-        return 0.0
+def _pickle_size_kb(obj) -> float:
+    buf = io.BytesIO()
+    pickle.dump(obj, buf)
+    return round(buf.tell() / 1024, 1)
+
+
+def _file_size_kb(path: Path) -> float:
     return round(path.stat().st_size / 1024, 1) if path.exists() else 0.0
+
+
+def _load_fuzzy_metrics() -> tuple[dict, dict]:
+    p = REPORTS["fuzzy_dt_single"]
+    if not p.exists():
+        return {}, {}
+    with p.open(encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("fuzzy_dt_single_metrics", {}), data.get("fuzzy_forest_metrics", {})
 
 
 def _load_metrics(key: str) -> dict:
@@ -45,105 +61,17 @@ def _load_metrics(key: str) -> dict:
         return {}
     with p.open(encoding="utf-8") as f:
         data = json.load(f)
-    # Fuzzy DT report nests metrics under two keys; we want the forest variant
-    if key == "fuzzy_forest":
-        return data.get("fuzzy_forest_metrics", {})
     return data.get("metrics", {})
 
 
-def _load_fuzzy_dt_single_metrics() -> dict:
-    p = REPORTS["fuzzy_forest"]
-    if not p.exists():
-        return {}
-    with p.open(encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("fuzzy_dt_single_metrics", {})
-
-
-def _measure_latency_fuzzy(df: pd.DataFrame) -> float:
-    """Vectorized: compute fuzzy features ONCE, then predict_proba on full batch."""
-    predictor = FuzzyForestPredictor("fuzzy_forest.pkl")
-    batch = df.iloc[:N_BATCH].copy()
-
-    # Single bulk enrichment — no per-row loop
-    enriched = predictor._fuzzy_features(batch)
-    model_input = enriched.reindex(columns=predictor.feature_order, fill_value=0).fillna(0)
-
-    t0 = time.perf_counter()
-    _ = predictor.model.predict_proba(model_input)
-    elapsed_ms = (time.perf_counter() - t0) * 1000
-    per_packet_ms = round(elapsed_ms / len(batch), 4)
-    return per_packet_ms
-
-
-def _measure_latency_normal_dt(df: pd.DataFrame) -> float:
-    """Normal DT: single batch predict_proba."""
-    p = REPORTS["normal_dt"]
-    if not p.exists():
-        return 0.0
-    with p.open(encoding="utf-8") as f:
-        rep = json.load(f)
-    features = [
-        "packet_length", "time_delta", "is_syn_only",
-        "syn_ack_ratio", "half_open_conn_count", "same_src_ip_freq",
-        "syn_packet_density", "udp_packet_density", "total_packet_density",
-        "byte_density", "retransmission_rate", "unique_dst_port_count",
-        "avg_time_between_syns", "pkt_len_mean", "pkt_len_std",
-        "udp_ratio", "syn_ratio",
-    ]
-    batch = df.iloc[:N_BATCH, :].copy()
-
-    # Reconstruct DT from saved report best_params (approximate size benchmark)
-    from sklearn.tree import DecisionTreeClassifier
-    params = rep.get("best_params", {})
-    model = DecisionTreeClassifier(**{k: v for k, v in params.items() if k != "class_weight"}, random_state=42)
-    # We just need the timing of predict_proba after fitting with dummy data
-    # Use the actual artifact path if we had saved it — instead we time a pre-loaded inference
-    # using the raw CSV data itself as a proxy benchmark
-    X_batch = batch.reindex(columns=features, fill_value=0).fillna(0).to_numpy()
-
-    t0 = time.perf_counter()
-    model.fit(X_batch, np.zeros(len(X_batch), dtype=int))  # dummy for structure
-    _ = model.predict_proba(X_batch)
-    elapsed_ms = (time.perf_counter() - t0) * 1000
-    per_packet_ms = round(elapsed_ms / len(batch), 4)
-    return per_packet_ms
-
-
-def _measure_latency_mlp(df: pd.DataFrame) -> float:
-    """MLP: single batch predict_proba after loading scaler + model."""
-    artifact_path = ARTIFACTS["deep_mlp"]
-    if artifact_path is None or not artifact_path.exists():
-        return 0.0
-    art = joblib.load(artifact_path)
-    scaler = art["scaler"]
-    model  = art["model"]
-    features = art["feature_order"]
-
-    batch = df.iloc[:N_BATCH].copy()
-    X_batch = batch.reindex(columns=features, fill_value=0).fillna(0)
-    X_scaled = scaler.transform(X_batch)
-
-    t0 = time.perf_counter()
-    _ = model.predict_proba(X_scaled)
-    elapsed_ms = (time.perf_counter() - t0) * 1000
-    per_packet_ms = round(elapsed_ms / len(batch), 4)
-    return per_packet_ms
-
-
-def _single_fuzzy_dt_size_kb() -> float:
-    """Size of a single Fuzzy DT tree extracted from the forest artifact."""
-    p = ARTIFACTS["fuzzy_forest"]
-    if p is None or not p.exists():
-        return 0.0
-    import io, pickle
-    art = joblib.load(p)
-    dt = art.get("fuzzy_dt_single")
-    if dt is None:
-        return 0.0
-    buf = io.BytesIO()
-    pickle.dump(dt, buf)
-    return round(buf.tell() / 1024, 1)
+def _time_median(fn) -> float:
+    fn()  # warm-up
+    times = []
+    for _ in range(N_REPEATS):
+        t0 = time.perf_counter()
+        fn()
+        times.append((time.perf_counter() - t0) * 1000)
+    return round(float(np.median(times)) / N_BATCH, 5)
 
 
 def main() -> None:
@@ -153,77 +81,134 @@ def main() -> None:
 
     df = pd.read_csv(CLEAN_CSV)
     test_df = df[df["split"] == "test"].reset_index(drop=True)
+    batch = test_df.iloc[:N_BATCH].copy()
 
-    rows = []
-    for key in ("normal_dt", "deep_mlp", "fuzzy_forest"):
-        m = _load_metrics(key)
-        if not m:
-            print(f"  [SKIP] {key} — no result JSON found.")
-            continue
-        acc = round(m.get("accuracy", 0) * 100, 2)
-        auc = round(m.get("auc", 0), 4)
-        rec = round(m.get("recall", 0) * 100, 2)
-        f1  = round(m.get("f1", 0), 4)
-        rows.append({"model": key, "accuracy_%": acc, "AUC": auc, "recall_%": rec, "F1": f1})
+    dt_metrics, forest_metrics = _load_fuzzy_metrics()
+    normal_metrics = _load_metrics("normal_dt")
+    mlp_metrics = _load_metrics("deep_mlp")
 
-    # Latency benchmark (vectorized bulk)
-    print("\n[Benchmark] Measuring vectorized batch inference latency (2000 packets)...")
+    # ---------- latency on real artifacts ----------
+    print(f"[Benchmark] per-packet latency, median of {N_REPEATS} runs on {N_BATCH} held-out packets...")
     latencies = {}
+
     try:
-        latencies["fuzzy_forest"] = _measure_latency_fuzzy(test_df)
-    except Exception as e:
+        predictor = FuzzyForestPredictor("fuzzy_forest.pkl")
+        feature_order = predictor.feature_order
+
+        def run_single():
+            enriched = predictor._fuzzy_features(batch)
+            model_input = enriched.reindex(columns=feature_order, fill_value=0).fillna(0)
+            return predictor.model.predict_proba(model_input)
+
+        latencies["fuzzy_dt_single"] = _time_median(run_single)
+
+        if predictor.forest is not None:
+            def run_forest():
+                enriched = predictor._fuzzy_features(batch)
+                model_input = enriched.reindex(columns=feature_order, fill_value=0).fillna(0)
+                return predictor.forest.predict_proba(model_input)
+
+            latencies["fuzzy_forest"] = _time_median(run_forest)
+    except Exception as e:  # noqa: BLE001
         print(f"  Fuzzy latency error: {e}")
-        latencies["fuzzy_forest"] = None
+
     try:
-        latencies["deep_mlp"] = _measure_latency_mlp(test_df)
-    except Exception as e:
+        nd = joblib.load("normal_dt.pkl")
+        nd_features = nd["feature_order"]
+
+        def run_normal():
+            X = batch.reindex(columns=nd_features, fill_value=0).fillna(0)
+            return nd["model"].predict_proba(X)
+
+        latencies["normal_dt"] = _time_median(run_normal)
+    except Exception as e:  # noqa: BLE001
+        print(f"  Normal DT latency error: {e}")
+
+    try:
+        mlp_art = joblib.load("deep_learning_mlp.pkl")
+        mlp_features = mlp_art["feature_order"]
+
+        def run_mlp():
+            X = mlp_art["scaler"].transform(batch.reindex(columns=mlp_features, fill_value=0).fillna(0))
+            return mlp_art["model"].predict_proba(X)
+
+        latencies["deep_mlp"] = _time_median(run_mlp)
+    except Exception as e:  # noqa: BLE001
         print(f"  MLP latency error: {e}")
-        latencies["deep_mlp"] = None
+
+    # ---------- model sizes ----------
+    sizes = {}
+    nodes = {}
     try:
-        latencies["normal_dt"] = _measure_latency_normal_dt(test_df)
-    except Exception as e:
-        print(f"  DT latency error: {e}")
-        latencies["normal_dt"] = None
+        art = joblib.load("fuzzy_forest.pkl")
+        sizes["fuzzy_dt_single"] = f"{_pickle_size_kb(art['model'])} KB"
+        nodes["fuzzy_dt_single"] = int(art["model"].tree_.node_count)
+        if art.get("model_forest") is not None:
+            sizes["fuzzy_forest"] = f"{_pickle_size_kb(art['model_forest']) / 1024:.2f} MB (30 trees)"
+    except Exception as e:  # noqa: BLE001
+        print(f"  Fuzzy size error: {e}")
+    try:
+        nd = joblib.load("normal_dt.pkl")
+        sizes["normal_dt"] = f"{_pickle_size_kb(nd['model'])} KB"
+        nodes["normal_dt"] = int(nd["model"].tree_.node_count)
+    except Exception as e:  # noqa: BLE001
+        print(f"  Normal DT size error: {e}")
+    try:
+        mlp_path = Path("deep_learning_mlp.pkl")
+        sizes["deep_mlp"] = f"{_file_size_kb(mlp_path) / 1024:.2f} MB (256-128-64-32)"
+    except Exception as e:  # noqa: BLE001
+        print(f"  MLP size error: {e}")
 
-    # Model sizes
-    single_dt_kb = _single_fuzzy_dt_size_kb()
-    forest_mb = _model_size_kb(ARTIFACTS["fuzzy_forest"]) / 1024
-    sizes = {
-        "fuzzy_forest": f"{forest_mb:.2f} MB (30 trees)",
-        "deep_mlp":     f"{_model_size_kb(ARTIFACTS['deep_mlp']):.1f} KB",
-        "normal_dt":    "45.0 KB (unpruned)",
-    }
+    # ---------- assembled table ----------
+    def row(name, m, deployed=False):
+        if not m:
+            return None
+        return {
+            "model": name,
+            "accuracy_%": round(m.get("accuracy", 0) * 100, 2),
+            "balanced_accuracy_%": round(m.get("balanced_accuracy", 0) * 100, 2),
+            "precision_%": round(m.get("precision", 0) * 100, 2),
+            "recall_%": round(m.get("recall", 0) * 100, 2),
+            "F1": round(m.get("f1", 0), 4),
+            "AUC": round(m.get("auc", 0), 4),
+            "deployed": deployed,
+        }
 
-    # Print comparison table
-    print("\n" + "=" * 75)
-    print(f"{'Model':<22} {'Accuracy':>10} {'AUC':>8} {'Recall':>8} {'F1':>7} {'Latency(ms/pkt)':>17} {'Size':>16}")
-    print("-" * 75)
+    rows = [
+        row("fuzzy_dt_single", dt_metrics, deployed=True),
+        row("fuzzy_forest", forest_metrics),
+        row("normal_dt", normal_metrics),
+        row("deep_mlp", mlp_metrics),
+    ]
+    rows = [r for r in rows if r]
+
+    print("\n" + "=" * 100)
+    print(f"{'Model':<20} {'Acc':>8} {'B-Acc':>8} {'Prec':>8} {'Recall':>8} {'F1':>8} {'AUC':>8} "
+          f"{'ms/pkt':>9} {'Size':>18}")
+    print("-" * 100)
     for r in rows:
         k = r["model"]
         lat = latencies.get(k)
-        lat_str = f"{lat:.4f}" if lat is not None else "N/A"
-        sz = sizes.get(k, "?")
-        print(f"{k:<22} {r['accuracy_%']:>9}% {r['AUC']:>8} {r['recall_%']:>7}% {r['F1']:>7} {lat_str:>17} {sz:>16}")
-    print("=" * 75)
+        print(f"{k:<20} {r['accuracy_%']:>7}% {r['balanced_accuracy_%']:>7}% "
+              f"{r['precision_%']:>7}% {r['recall_%']:>7}% {r['F1']:>8} {r['AUC']:>8} "
+              f"{(f'{lat:.4f}' if lat is not None else 'N/A'):>9} {sizes.get(k, '?'):>18}")
+    print("=" * 100)
+    if nodes:
+        print(f"tree nodes: {nodes}")
 
-    # Include Fuzzy DT (single tree) row
-    fd = _load_fuzzy_dt_single_metrics()
-    if fd:
-        acc = round(fd.get("accuracy", 0) * 100, 2)
-        auc = round(fd.get("auc", 0), 4)
-        rec = round(fd.get("recall", 0) * 100, 2)
-        f1  = round(fd.get("f1", 0), 4)
-        print(f"{'fuzzy_dt_single':<22} {acc:>9}% {auc:>8} {rec:>7}% {f1:>7} {'<0.01':>17} {single_dt_kb:>13}KB")
-        print("=" * 75)
-
-    # Save full report
     report = {
         "models": rows,
         "latency_ms_per_packet": latencies,
         "model_sizes": sizes,
+        "tree_nodes": nodes,
+        "evaluation": {
+            "split": "chronological per-segment 80/20 with 50-packet buffer (no window overlap)",
+            "threshold_tuning": "shared objective (0.5*F1 + 0.3*accuracy + 0.2*balanced-accuracy, recall floor 0.35) on train",
+            "latency": f"median of {N_REPEATS} vectorized runs on {N_BATCH} test packets, real artifacts, fuzzy enrichment included",
+        },
         "fuzzy_dt_single": {
-            "accuracy_%": round(fd.get("accuracy", 0) * 100, 2) if fd else None,
-            "size_kb": single_dt_kb,
+            "accuracy_%": next((r["accuracy_%"] for r in rows if r["model"] == "fuzzy_dt_single"), None),
+            "size_kb": sizes.get("fuzzy_dt_single"),
         },
     }
     Path("reports").mkdir(exist_ok=True)
