@@ -1,5 +1,10 @@
 """Traffic attack generator using hping3 for Raspberry Pi DDoS simulation.
 
+SUPERSEDED for demonstrations: use traffic_simulator.py, which supports normal,
+suspicious, congestion and flood scenes, source spoofing/rotation, safety
+guards, and ground-truth logging. This script is kept as historical research
+code for reproducing the original capture (hping3 cycles).
+
 Supports standard SYN Flood and UDP Flood attack simulation cycles with
 automatic timestamp logging to reports/labels_map.txt.
 """

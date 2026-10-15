@@ -1,23 +1,47 @@
 {
-  "input_csv": "syn_udp_flood_attack_data_labeled.csv",
-  "output_csv": "syn_udp_flood_attack_data_clean.csv",
+  "input_csv": "data\\syn_udp_flood_attack_data_labeled_diraware.csv",
+  "output_csv": "data\\syn_udp_flood_attack_data_clean.csv",
   "rows_total": 194792,
-  "attack_rows": 28943,
-  "normal_rows": 165849,
-  "attack_ratio": 0.14858413076512383,
+  "attack_rows": 14520,
+  "normal_rows": 180272,
+  "attack_ratio": 0.07454104891371309,
+  "split_mode": "chronological_per_segment (80/20 with 50-packet buffer)",
   "split_counts": {
-    "train": 155833,
-    "test": 38959
+    "train": 155835,
+    "test": 38747,
+    "buffer": 210
   },
   "split_attack_ratio": {
-    "test": 0.14859210965373854,
-    "train": 0.148582136004569
+    "buffer": 0.23809523809523808,
+    "test": 0.07644462797119778,
+    "train": 0.0738473385311387
   },
-  "scenario_counts": {
-    "outside_logged_window": 165799,
-    "Standard SYN Flood": 20572,
-    "Standard UDP Flood": 8371,
-    "Normal/Silence": 50
+  "per_segment": {
+    "1:outside_logged_window": {
+      "buffer": 50,
+      "test": 31547,
+      "train": 126390
+    },
+    "2:Standard SYN Flood": {
+      "buffer": 50,
+      "test": 4064,
+      "train": 16458
+    },
+    "3:Normal/Silence": {
+      "buffer": 10,
+      "test": 0,
+      "train": 40
+    },
+    "4:Standard UDP Flood": {
+      "buffer": 50,
+      "test": 1624,
+      "train": 6697
+    },
+    "5:outside_logged_window": {
+      "buffer": 50,
+      "test": 1512,
+      "train": 6250
+    }
   },
   "window": 50,
   "random_state": 42

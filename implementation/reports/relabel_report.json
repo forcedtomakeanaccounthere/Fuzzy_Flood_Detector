@@ -1,0 +1,10 @@
+{
+  "input": "data\\syn_udp_flood_attack_data_labeled.csv",
+  "output": "data\\syn_udp_flood_attack_data_labeled_diraware.csv",
+  "windows_total": 2,
+  "windows_with_victim": 2,
+  "attack_rows_before": 28943,
+  "response_rows_reverted": 14208,
+  "background_rows_reverted": 215,
+  "attack_rows_after": 14520
+}
