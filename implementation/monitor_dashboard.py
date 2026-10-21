@@ -664,6 +664,7 @@ def make_handler(state_path: Path, events_path: Path, benchmark_path: Path, cont
                     except ValueError:
                         since = 0
                 out = {"offset": since, "packets": [], "reset": False}
+                packets = []  # Initialize outside try block
                 try:
                     size = events_path.stat().st_size
                     if since > size:  # log rotated
@@ -673,7 +674,6 @@ def make_handler(state_path: Path, events_path: Path, benchmark_path: Path, cont
                             f.seek(since)
                         new_text = f.read()
                     out["offset"] = since + len(new_text.encode("utf-8"))
-                    packets = []
                     for line in new_text.splitlines():
                         line = line.strip()
                         if not line:
