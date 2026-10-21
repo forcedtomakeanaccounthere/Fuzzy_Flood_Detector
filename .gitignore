@@ -26,7 +26,7 @@ implementation/normal_dt_results.json
 implementation/syn_udp_flood_attack_data_label_report*.json
 
 # Generated deployment artifact and live monitor output
-implementation/*.pkl
+# implementation/*.pkl
 implementation/*_events.jsonl
 # Detector/dashboard runtime files (regenerated every run)
 implementation/reports/monitor_events.jsonl*
